@@ -1,0 +1,7 @@
+node_modules/
+output*/
+responses/
+user-data/
+package-lock.json
+*.log
+.vscode/
