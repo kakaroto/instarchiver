@@ -62,18 +62,26 @@ export default class Instagram {
 		return this.incognito;
 	}
 
+	async _saveResponse(data, queryName) {
+		const timestamp = Date.now();
+		const safeName = sanitizeFilename(queryName || 'data');
+		const filename = path.join(this.options.output, `${timestamp}_${safeName}_${this._queryId++}.json`);
+		await fs.writeFile(filename, JSON.stringify(data, null, 2));
+		this._queryCache[queryName] = this._queryCache[queryName] || [];
+		this._queryCache[queryName].push(data);
+	}
+
 	async _onPageResponse(response) {
-		const contentType = response.headers()['content-type'] || '';
-		if (contentType.includes('application/json') && response.url().match(/instagram\.com\/graphql\/query/)) {
-			const json = await response.json();
-			const queryName = Object.keys(json?.data).find(key => key.startsWith("xdt_api")) || Object.keys(json?.data)[0];
-			const timestamp = Date.now();
-			const safeName = sanitizeFilename(queryName || 'data');
-			const filename = path.join(this.options.output, `${timestamp}_${safeName}_${this._queryId++}.json`);
-			await fs.writeFile(filename, JSON.stringify(json, null, 2));
-			console.log(`Received graphql response: ${queryName} (${response.status()})`);
-			this._queryCache[queryName] = this._queryCache[queryName] || [];
-			this._queryCache[queryName].push(json);
+		try {
+			const contentType = response.headers()['content-type'] || '';
+			if (contentType.includes('application/json') && response.url().match(/instagram\.com\/graphql\/query/)) {
+				const json = await response.json();
+				const queryName = Object.keys(json?.data).find(key => key.startsWith("xdt_api")) || Object.keys(json?.data)[0];
+				console.log(`Received graphql response: ${queryName} (${response.status()})`);
+				await this._saveResponse(json, queryName);
+			}
+		} catch (err) {
+			console.error(`Error processing response from ${response.url()}:`, err);
 		}
 	}
 	
@@ -277,6 +285,7 @@ export default class Instagram {
 					console.log(`📸 Archiving highlight ${highlight.title} (${highlightId})...`);
 					const highlightData = this.getHighlightData(highlightId);
 					const highlightDir = path.join(highlightsOutput, sanitizeFilename(highlight.title));
+					await fs.mkdirs(highlightDir);
 					if (!highlightData) {
 						await this.archivePage(highlight.url, highlightDir);
 					} else {
@@ -293,8 +302,7 @@ export default class Instagram {
 				console.error('❌ No media data found in page.');
 				return;
 			}
-			this._queryCache[queryName] = this._queryCache[queryName] || [];
-			this._queryCache[queryName].push({data: data});
+			await this._saveResponse({data: data}, queryName);
 			const mediaCode = pageUrl.split("/").filter(a => a).pop();
 			let mediaData = this.getMediaData(mediaCode);
 			if (!mediaData) {
@@ -312,8 +320,7 @@ export default class Instagram {
 				console.error('❌ No highlight data found in page.');
 				return;
 			}
-			this._queryCache[queryName] = this._queryCache[queryName] || [];
-			this._queryCache[queryName].push({data: data});
+			await this._saveResponse({data: data}, queryName);
 			const highlightId = pageUrl.split("/").filter(a => a).pop();
 			let highlightData = this.getHighlightData(highlightId);
 			if (!highlightData) {
@@ -329,10 +336,29 @@ export default class Instagram {
 
 	async downloadHighlights(highlightData, outputDir = this.options.output) {
 			console.log(`📸 Highlight ${highlightData.title} has ${highlightData.items?.length} items`);
-			const output = path.join(outputDir, type, sanitizeFilename(highlightData.title));
-			await fs.mkdirs(output);
-			await fs.writeFile(path.join(output, "highlight.json"), JSON.stringify(highlightData, null, 2));
+			await fs.writeFile(path.join(outputDir, "highlight.json"), JSON.stringify(highlightData, null, 2));
 			
+			for (const item of highlightData.items || []) {
+				// Name the folder based on the taken_at field of the media data
+				const date = new Date(item.taken_at * 1000 || Date.now());
+				const itemDir = path.join(outputDir, formatDateForFilename(date));
+				if (await fs.pathExists(itemDir)) {
+					console.warn(`⚠️ Folder ${itemDir} already exists. Skipping download for this item.`);
+					continue;
+				}
+				await fs.mkdirs(itemDir);
+				await this._downloadMediaFromData(item, itemDir, {
+					filename: item.video_versions ? "highlight.mp4" : "highlight.jpg"
+				});
+				if (item.story_feed_media && item.story_feed_media.length > 0) {
+					for (const media of item.story_feed_media) {
+						await this.downloadMedia(media.media_code, itemDir);
+					}
+				} else {
+					console.warn(`⚠️ No media code found for item ${item.id}. Skipping download.`);
+				}
+
+			}
 	}
 
 	// Get the media data from the incognito page or using normal page if it fails to find the media in incognito
@@ -341,48 +367,56 @@ export default class Instagram {
 	// Download the images or video depending on what is available, then save the caption to a caption.txt file
 	// in the same folder
 	async downloadMedia(mediaCode, outputDir = this.options.output) {
+		const queryName = 'xdt_api__v1__media__shortcode__web_info';
 		const incognitoPage = await this._ensureIncognitoExists();
 		await incognitoPage.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
-		let mediaData = await this._findObjectFromPage('xdt_api__v1__media__shortcode__web_info', { page: incognitoPage });
-		if (!mediaData) {
-			const page = await this._ensureIncognitoExists();
+		let webInfo = await this._findObjectFromPage(queryName, { page: incognitoPage });
+		if (!webInfo) {
 			console.warn(`❌ No media data found for ${mediaCode} in incognito tab.`);
 			// Might be a private post, try to fetch it from the normal page
+			const page = await this._ensurePageExists();
 			await page.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
-			mediaData = await this._findObjectFromPage('xdt_api__v1__media__shortcode__web_info');
+			webInfo = await this._findObjectFromPage(queryName, { page });
 		}
+		await this._saveResponse({data: webInfo}, queryName);
+		const mediaData = webInfo?.xdt_api__v1__media__shortcode__web_info?.items[0];
 		if (!mediaData) {
 			console.error(`❌ No media data found for ${mediaCode}.`);
+			console.log(util.inspect(webInfo, { depth: null, colors: true }));
 			return null;
 		}
-		// Name the folder based on the taken_at field of the media data
-		const date = new Date(mediaData.taken_at * 1000 || Date.now());
-		const output = path.join(outputDir, formatDateForFilename(date));
-		console.log(`📸 Downloading media ${mediaCode} to ${output}...`);
-		await fs.mkdirs(output);
-		await fs.writeFile(path.join(output, "media.json"), JSON.stringify(mediaData, null, 2));
-		await fs.writeFile(path.join(output, "caption.txt"), mediaData.caption || '');
-		await this._downloadMediaFromData(mediaData, output);
+		if (mediaData.code !== mediaCode) {
+			console.error(`⚠️ Media code mismatch: expected ${mediaCode}, got ${mediaData.code}. Cancelling download.`);
+			return null;
+		}
+		await fs.writeFile(path.join(outputDir, "media.json"), JSON.stringify(mediaData, null, 2));
+		await fs.writeFile(path.join(outputDir, "caption.txt"), mediaData.caption?.text || '');
+		console.log(`📸 Downloading media ${mediaCode} to ${outputDir}...`);
+		await this._downloadMediaFromData(mediaData, outputDir, { page: incognitoPage});
 	}
 
 	// Download media items from the media data object
-	_downloadMediaFromData(mediaData, outputFolder) {
+	async _downloadMediaFromData(mediaData, outputFolder, { filename, page } = {}) {
 		if (!mediaData || !outputFolder) {
 			console.error('❌ Invalid media data or output folder.');
 			return;
 		}
 
 		const mediaItems = mediaData.carousel_media || [mediaData];
-		const downloadPromises = mediaItems.map(item => {
+		let idx = 1;
+		for (const item of mediaItems) {
 			const mediaUrl = item.video_versions?.[0]?.url || item.image_versions2?.candidates?.[0]?.url;
 			if (!mediaUrl) {
 				console.warn(`❌ No media URL found for item ${item.code}. Skipping...`);
-				return Promise.resolve();
+				continue;
 			}
-			return this._downloadMedia(mediaUrl, outputFolder);
-		});
+			await this._downloadMedia(mediaUrl, outputFolder, {
+				filename,
+				prefix: mediaItems.length > 1 ? `${String(idx++).padStart(2, '0')} - ` : undefined,
+				page: page || this.page
+			});
+		}
 
-		return Promise.all(downloadPromises);
 	}
 	
 	/**
@@ -390,9 +424,29 @@ export default class Instagram {
 	 * @param {string} url - The URL to download.
 	 * @param {string} folder - The folder path to save the file in.
 	 */
-	async _downloadMedia(url, folder, { filename } = {}) {
+	async _downloadMedia(url, folder, { filename, prefix, page } = {}) {
 		try {
-			const response = await fetch(url);
+			let headers;
+			if (page) {
+				// Get cookies from Puppeteer and build cookie header
+				const cookies = await page.cookies(url);
+				const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+				// Get the user-agent from the Puppeteer page
+				const userAgent = await page.evaluate(() => navigator.userAgent);
+
+				// Optional: get other headers (e.g., referer)
+				const referer = page.url();
+
+				// Build headers
+				headers = {
+					'User-Agent': userAgent,
+					'Cookie': cookieHeader,
+					'Referer': referer,
+					'Accept': '*/*',
+				};
+			}
+			const response = await fetch(url, { headers});
 
 			if (!response.ok) {
 				throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
@@ -417,6 +471,9 @@ export default class Instagram {
 					const urlPath = new URL(url).pathname;
 					filename = path.basename(urlPath) || 'downloaded-file';
 				}
+			}
+			if (prefix) {
+				filename = `${prefix}${filename}`;
 			}
 			const fullPath = path.join(folder, filename);
 			const fileStream = fs.createWriteStream(fullPath);
