@@ -1,5 +1,6 @@
 export function sanitizeFilename(name) {
-    return (name || "unnnamed").replace(/[^a-z0-9]/gi, '_').slice(0, 100);
+	// Replace any character that is not accepted in filenames with an underscore
+	return (name || "unnamed").replace(/[^a-z0-9 _-]/gi, '_').slice(0, 100);
 }
 export async function waitMS(ms, randomness = 0) {
 	return new Promise(r => setTimeout(r, ms + Math.floor(Math.random() * randomness)));

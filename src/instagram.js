@@ -76,9 +76,11 @@ export default class Instagram {
 			const contentType = response.headers()['content-type'] || '';
 			if (contentType.includes('application/json') && response.url().match(/instagram\.com\/graphql\/query/)) {
 				const json = await response.json();
-				const queryName = Object.keys(json?.data).find(key => key.startsWith("xdt_api")) || Object.keys(json?.data)[0];
-				console.log(`Received graphql response: ${queryName} (${response.status()})`);
-				await this._saveResponse(json, queryName);
+				const queryName = Object.keys(json?.data || {}).find(key => key.startsWith("xdt_api")) || Object.keys(json?.data || {})[0];
+				if (queryName) {
+					console.log(`Received graphql response: ${queryName} (${response.status()})`);
+					await this._saveResponse(json, queryName);
+				}
 			}
 		} catch (err) {
 			console.error(`Error processing response from ${response.url()}:`, err);
@@ -156,13 +158,13 @@ export default class Instagram {
 		const highlightFeed = feeds.find(f => (f.data?.xdt_api__v1__feed__reels_media__connection?.edges || []).find(e => e.node?.id == highlightId));
 		if (!highlightFeed) {
 			console.error(`❌ Highlight ${highlightId} not found in feeds data.`);
-			console.log(util.inspect(feeds, { depth: null, colors: true }));
+			//console.log(util.inspect(feeds, { depth: null, colors: true }));
 			return null;
 		}
 		const highlightData = highlightFeed.data?.xdt_api__v1__feed__reels_media__connection?.edges.find(e => e.node?.id == highlightId);
 		if (!highlightData) {
 			console.error('❌ No highlight data found.');
-			console.log(util.inspect(highlightFeed, { depth: null, colors: true }));
+			//console.log(util.inspect(highlightFeed, { depth: null, colors: true }));
 			return null;
 		}
 		return highlightData.node;
@@ -264,12 +266,10 @@ export default class Instagram {
 			return;
 		}
 
-		await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
-
-		// Wait for the page to load
-		await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
 
 		if (type === 'profile') {
+			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
+			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
 			const output = path.join(outputDir, sanitizeFilename(pageUrl.split('/').filter(a => a).pop()));
 			await fs.mkdirs(output);
 			//await fs.writeFile(path.join(output, "profile.json"), JSON.stringify({ url: pageUrl }, null, 2));
@@ -292,28 +292,14 @@ export default class Instagram {
 						console.log(`📸 Highlight ${highlight.title} has ${highlightData.items?.length} items`);
 						await this.downloadHighlights(highlightData, highlightDir);
 					}
-					break;
 				}
 			}
 		} else if (type === 'media') {
-			const queryName = 'xdt_api__v1__media__shortcode__web_info';
-			const data = await this._findObjectFromPage(queryName);
-			if (!data) {
-				console.error('❌ No media data found in page.');
-				return;
-			}
-			await this._saveResponse({data: data}, queryName);
 			const mediaCode = pageUrl.split("/").filter(a => a).pop();
-			let mediaData = this.getMediaData(mediaCode);
-			if (!mediaData) {
-				console.error('❌ No media data found in query cache.');
-				mediaData = data?.xdt_api__v1__media__shortcode__web_info?.items[0];
-			}
-			console.log(`📸 media ${mediaCode} has URL: ${mediaData.video}`);
-			const output = path.join(outputDir, type, sanitizeFilename(mediaCode));
-			await fs.mkdirs(output);
-			await fs.writeFile(path.join(output, "media.json"), JSON.stringify(mediaData, null, 2));
+			await this.downloadMedia(mediaCode, outputDir);
 		} else if (type === 'highlight') {
+			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
+			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
 			const queryName = 'xdt_api__v1__feed__reels_media__connection';
 			const data = await this._findObjectFromPage(queryName);
 			if (!data) {
