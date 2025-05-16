@@ -4,7 +4,7 @@ import Instagram from './instagram.js';
 
 async function main() {
     const args = minimist(process.argv.slice(2), {
-        boolean: ['headless', 'logout', 'debug'],
+        boolean: ['headless', 'logout', 'debug', 'update', 'incognito'],
         string: ['user-data', 'output'],
         alias: {
             h: 'help',
@@ -17,17 +17,20 @@ async function main() {
             headless: true,
             logout: false,
             debug: false,
+            incognito: true,
         },
     });
-    console.log('Arguments:', args);
 
     if (args.help || args.h) {
         console.log('Usage: node index.js [options] [@username,highglight:id,url...]');
         console.log('Options:');
+        console.log('  --output                 Output directory for saved pages');
+        console.log('  --user-data              User data directory (required to save cookies)');
+        console.log('  --update                 Update an existing archive');
+        console.log('  --incognito              Use incognito mode for downloading public media reels');
         console.log('  --no-headless            Run browser in non-headless mode');
         console.log('  --logout                 logout when done');
-        console.log('  --user-data              User data directory (required to save cookies)');
-        console.log('  --output                 Output directory for saved pages');
+        console.log('  --help, -h               Show this help message');
         console.log('  --debug                  Enable debug mode');
         console.log('  --help, -h               Show this help message');
         process.exit(0);

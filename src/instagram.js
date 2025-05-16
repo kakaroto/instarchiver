@@ -267,6 +267,7 @@ export default class Instagram {
 		}
 
 
+		let retValue = 0;
 		if (type === 'profile') {
 			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
 			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
@@ -286,11 +287,20 @@ export default class Instagram {
 					const highlightData = this.getHighlightData(highlightId);
 					const highlightDir = path.join(highlightsOutput, sanitizeFilename(highlight.title));
 					await fs.mkdirs(highlightDir);
+					let downloaded = 0;
 					if (!highlightData) {
-						await this.archivePage(highlight.url, highlightDir);
+						downloaded = await this.archivePage(highlight.url, highlightDir);
 					} else {
 						console.log(`📸 Highlight ${highlight.title} has ${highlightData.items?.length} items`);
-						await this.downloadHighlights(highlightData, highlightDir);
+						downloaded = await this.downloadHighlights(highlightData, highlightDir);
+					}
+					retValue += downloaded;
+					if (this.options.update) {
+						// If we're updating our archive, stop after the first highlight which had no new downloads
+						if (downloaded === 0) {
+							console.log(`⚠️ No new downloads for highlight ${highlight.title}. Stopping further downloads.`);
+							break;
+						}
 					}
 				}
 			}
@@ -314,37 +324,40 @@ export default class Instagram {
 				highlightData = data?.xdt_api__v1__feed__reels_media__connection?.edges[0].node;
 				//console.log(util.inspect(highlightData, { depth: null, colors: true }));
 			}
-			await this.downloadHighlights(highlightData, outputDir);
+			retValue = await this.downloadHighlights(highlightData, outputDir);
 		}
 
 		console.log(`📸 Finished archiving ${pageUrl}.`);
+		return retValue;
 	}
 
 	async downloadHighlights(highlightData, outputDir = this.options.output) {
-			console.log(`📸 Highlight ${highlightData.title} has ${highlightData.items?.length} items`);
-			await fs.writeFile(path.join(outputDir, "highlight.json"), JSON.stringify(highlightData, null, 2));
-			
-			for (const item of highlightData.items || []) {
-				// Name the folder based on the taken_at field of the media data
-				const date = new Date(item.taken_at * 1000 || Date.now());
-				const itemDir = path.join(outputDir, formatDateForFilename(date));
-				if (await fs.pathExists(itemDir)) {
-					console.warn(`⚠️ Folder ${itemDir} already exists. Skipping download for this item.`);
-					continue;
-				}
-				await fs.mkdirs(itemDir);
-				await this._downloadMediaFromData(item, itemDir, {
-					filename: item.video_versions ? "highlight.mp4" : "highlight.jpg"
-				});
-				if (item.story_feed_media && item.story_feed_media.length > 0) {
-					for (const media of item.story_feed_media) {
-						await this.downloadMedia(media.media_code, itemDir);
-					}
-				} else {
-					console.warn(`⚠️ No media code found for item ${item.id}. Skipping download.`);
-				}
-
+		console.log(`📸 Highlight ${highlightData.title} has ${highlightData.items?.length} items`);
+		await fs.writeFile(path.join(outputDir, "highlight.json"), JSON.stringify(highlightData, null, 2));
+		
+		let downloaded = 0;
+		for (const item of highlightData.items || []) {
+			// Name the folder based on the taken_at field of the media data
+			const date = new Date(item.taken_at * 1000 || Date.now());
+			const itemDir = path.join(outputDir, formatDateForFilename(date));
+			if (await fs.pathExists(itemDir)) {
+				console.warn(`⚠️ Folder ${itemDir} already exists. Skipping download for this item.`);
+				continue;
 			}
+			await fs.mkdirs(itemDir);
+			await this._downloadMediaFromData(item, itemDir, {
+				filename: item.video_versions ? "highlight.mp4" : "highlight.jpg"
+			});
+			if (item.story_feed_media && item.story_feed_media.length > 0) {
+				for (const media of item.story_feed_media) {
+					await this.downloadMedia(media.media_code, itemDir);
+				}
+			} else {
+				console.warn(`⚠️ No media code found for item ${item.id}. Skipping download.`);
+			}
+			downloaded++;
+		}
+		return downloaded;
 	}
 
 	// Get the media data from the incognito page or using normal page if it fails to find the media in incognito
@@ -354,21 +367,29 @@ export default class Instagram {
 	// in the same folder
 	async downloadMedia(mediaCode, outputDir = this.options.output) {
 		const queryName = 'xdt_api__v1__media__shortcode__web_info';
-		const incognitoPage = await this._ensureIncognitoExists();
-		await incognitoPage.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
-		let webInfo = await this._findObjectFromPage(queryName, { page: incognitoPage });
-		if (!webInfo) {
-			console.warn(`❌ No media data found for ${mediaCode} in incognito tab.`);
-			// Might be a private post, try to fetch it from the normal page
-			const page = await this._ensurePageExists();
-			await page.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
-			webInfo = await this._findObjectFromPage(queryName, { page });
+		const incognitoPage = this.options.incognito ? await this._ensureIncognitoExists() : await this._ensurePageExists();
+		
+		// Check if the media data is already cached
+		let mediaData = this.getMediaData(mediaCode);
+		if (!mediaData) {
+			await incognitoPage.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
+			let webInfo = await this._findObjectFromPage(queryName, { page: incognitoPage });
+			if (!webInfo && this.options.incognito) {
+				console.warn(`❌ No media data found for ${mediaCode} in incognito tab.`);
+				// Might be a private post, try to fetch it from the normal page
+				const page = await this._ensurePageExists();
+				await page.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
+				webInfo = await this._findObjectFromPage(queryName, { page });
+			}
+			if (!webInfo) {
+				console.error(`❌ No media data found for ${mediaCode}.`);
+				return null;
+			}
+			await this._saveResponse({data: webInfo}, queryName);
+			mediaData = webInfo?.xdt_api__v1__media__shortcode__web_info?.items[0];
 		}
-		await this._saveResponse({data: webInfo}, queryName);
-		const mediaData = webInfo?.xdt_api__v1__media__shortcode__web_info?.items[0];
 		if (!mediaData) {
 			console.error(`❌ No media data found for ${mediaCode}.`);
-			console.log(util.inspect(webInfo, { depth: null, colors: true }));
 			return null;
 		}
 		if (mediaData.code !== mediaCode) {
