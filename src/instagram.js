@@ -124,13 +124,27 @@ export default class Instagram {
 		return null;
 	}
 
-	getHighlights() {
+	getUserData(username) {
+		const users = this._queryCache['user'];
+		if (!users) {
+			console.error('❌ No user data found.');
+			return null;
+		}
+		const userData = users.find(u => !username || u?.data?.user?.username == username);
+		if (!userData) {
+			console.error('❌ No user data found in query cache.');
+			return null;
+		}
+		return userData.data.user;
+	}
+
+	getHighlights(username) {
 		const highlights = this._queryCache['highlights'];
 		if (!highlights) {
 			console.error('❌ No highlights found.');
 			return [];
 		}
-		const highlightData = highlights[0]?.data?.highlights?.edges;
+		const highlightData = highlights.find(h => h?.data?.highlights?.edges?.length && h.data.highlights.edges[0].user?.username == username)?.data.highlights.edges;
 		if (!highlightData) {
 			console.error('❌ No highlight data found.');
 			return [];
@@ -168,6 +182,48 @@ export default class Instagram {
 			return null;
 		}
 		return highlightData.node;
+	}
+
+	// Same as the getHighlightData but checks node.username instead of node.id for the user stories
+	getStoriesConnectionData(username) {
+		const feeds = this._queryCache['xdt_api__v1__feed__reels_media__connection'];
+		if (!feeds) {
+			console.error('❌ No feeds found.');
+			return null;
+		}
+		const storiesFeed = feeds.find(f => (f.data?.xdt_api__v1__feed__reels_media__connection?.edges || []).find(e => e.node?.username == username));
+		if (!storiesFeed) {
+			console.error(`❌ ${username} stories not found in feeds data.`);
+			return null;
+		}
+		const storiesData = storiesFeed.data?.xdt_api__v1__feed__reels_media__connection?.edges.find(e => e.node?.username == username);
+		if (!storiesData) {
+			console.error('❌ No highlight data found.');
+			return null;
+		}
+		return storiesData.node;
+	}
+
+	getStoriesData(username) {
+		const feeds = this._queryCache['xdt_api__v1__feed__reels_media'];
+		if (!feeds) {
+			console.error('❌ No feeds found.');
+			// Try using the reels_media_connection instead
+			return this.getStoriesConnectionData(username);
+		}
+		const storiesFeed = feeds.find(f => (f.data?.xdt_api__v1__feed__reels_media?.reels_media || []).find(m => m.user?.username == username));
+		if (!storiesFeed) {
+			console.error(`❌ ${username} stories not found in feeds data.`);
+			// Try using the reels_media_connection instead
+			return this.getStoriesConnectionData(username);
+		}
+		const storiesData = storiesFeed.data?.xdt_api__v1__feed__reels_media?.reels_media.find(m => m.user?.username == username);
+		if (!storiesData) {
+			console.error('❌ No stories data found.');
+			// Try using the reels_media_connection instead
+			return this.getStoriesConnectionData(username);
+		}
+		return storiesData;
 	}
 
 	getMediaData(mediaCode) {
@@ -250,6 +306,9 @@ export default class Instagram {
 				type = 'highlight';
 			} else if (pageUrl.match(/instagram\.com\/[^/]+\/?$/)) {
 				type = 'profile';
+			} else if (pageUrl.match(/instagram\.com\/stories\/[^/]+\/?$/)) {
+				type = 'stories';
+			}
 			}
 		} else {
 			if (pageUrl.startsWith('highlight:')) {
@@ -269,44 +328,73 @@ export default class Instagram {
 
 		let retValue = 0;
 		if (type === 'profile') {
+			const username = pageUrl.split('/').filter(a => a).pop();
+			console.log(`📸 Archiving profile of ${username}...`);
 			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
 			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
 			const output = path.join(outputDir, sanitizeFilename(pageUrl.split('/').filter(a => a).pop()));
 			await fs.mkdirs(output);
-			//await fs.writeFile(path.join(output, "profile.json"), JSON.stringify({ url: pageUrl }, null, 2));
-			const highlights = this.getHighlights();
-			if (highlights) {
-				console.log(`📸 Found ${highlights.length} highlights.`);
-				console.log(highlights.map(h => h.title).join(', '));
-				const highlightsOutput = path.join(output, 'highlights');
-				await fs.mkdirs(highlightsOutput);
-				await fs.writeFile(path.join(highlightsOutput, "highlights.json"), JSON.stringify(highlights, null, 2));
-				for (const highlight of highlights) {
-					const highlightId = highlight.id;
-					console.log(`📸 Archiving highlight ${highlight.title} (${highlightId})...`);
-					const highlightData = this.getHighlightData(highlightId);
-					const highlightDir = path.join(highlightsOutput, sanitizeFilename(highlight.title));
-					await fs.mkdirs(highlightDir);
-					let downloaded = 0;
-					if (!highlightData) {
-						downloaded = await this.archivePage(highlight.url, highlightDir);
-					} else {
-						console.log(`📸 Highlight ${highlight.title} has ${highlightData.items?.length} items`);
-						downloaded = await this.downloadHighlights(highlightData, highlightDir);
-					}
-					retValue += downloaded;
-					if (this.options.update) {
-						// If we're updating our archive, stop after the first highlight which had no new downloads
-						if (downloaded === 0) {
-							console.log(`⚠️ No new downloads for highlight ${highlight.title}. Stopping further downloads.`);
-							break;
+			const user = this.getUserData(username);
+			await fs.writeFile(path.join(output, "profile.json"), JSON.stringify(user, null, 2));
+			if (this.options.highlights) {
+				const highlights = this.getHighlights(username);
+				if (highlights) {
+					console.log(`📸 Found ${highlights.length} highlights.`);
+					console.log(highlights.map(h => h.title).join(', '));
+					const highlightsOutput = path.join(output, 'highlights');
+					await fs.mkdirs(highlightsOutput);
+					await fs.writeFile(path.join(highlightsOutput, "highlights.json"), JSON.stringify(highlights, null, 2));
+					for (const highlight of highlights) {
+						const highlightId = highlight.id;
+						console.log(`📸 Archiving highlight ${highlight.title} (${highlightId})...`);
+						const highlightData = this.getHighlightData(highlightId);
+						const highlightDir = path.join(highlightsOutput, sanitizeFilename(highlight.title));
+						await fs.mkdirs(highlightDir);
+						let downloaded = 0;
+						if (!highlightData) {
+							downloaded = await this.archivePage(highlight.url, highlightDir);
+						} else {
+							console.log(`📸 Highlight ${highlight.title} has ${highlightData.items?.length} items`);
+							downloaded = await this.downloadStories(highlightData, highlightDir);
+						}
+						retValue += downloaded;
+						if (this.options.update) {
+							// If we're updating our archive, stop after the first highlight which had no new downloads
+							if (downloaded === 0) {
+								console.log(`⚠️ No new downloads for highlight ${highlight.title}. Stopping further downloads.`);
+								break;
+							}
 						}
 					}
 				}
 			}
+			if (this.options.stories) {
+				const storiesUrl = `https://www.instagram.com/stories/${username}/`;
+				const storiesOutput = path.join(output, 'stories');
+				await fs.mkdirs(storiesOutput);
+				await this.archivePage(storiesUrl, storiesOutput);
+			}
 		} else if (type === 'media') {
 			const mediaCode = pageUrl.split("/").filter(a => a).pop();
 			await this.downloadMedia(mediaCode, outputDir);
+		} else if (type === 'stories') {
+			const username = pageUrl.split('/').filter(a => a).pop();
+			console.log(`📸 Archiving stories of ${username}...`);
+			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
+			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
+			const queryName = 'xdt_api__v1__feed__reels_media';
+			const data = await this._findObjectFromPage(queryName);
+			if (!data) {
+				console.error('❌ No stories data found in page.');
+				return;
+			}
+			await this._saveResponse({data: data}, queryName);
+			let storiesData = this.getStoriesData(username);
+			if (!storiesData) {
+				console.error('❌ No stories data found in query cache.');
+				storiesData = data?.xdt_api__v1__feed__reels_media?.reels_media[0];
+			}
+			retValue = await this.downloadStories(storiesData, outputDir);
 		} else if (type === 'highlight') {
 			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
 			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
@@ -324,19 +412,21 @@ export default class Instagram {
 				highlightData = data?.xdt_api__v1__feed__reels_media__connection?.edges[0].node;
 				//console.log(util.inspect(highlightData, { depth: null, colors: true }));
 			}
-			retValue = await this.downloadHighlights(highlightData, outputDir);
+			retValue = await this.downloadStories(highlightData, outputDir);
 		}
 
 		console.log(`📸 Finished archiving ${pageUrl}.`);
 		return retValue;
 	}
 
-	async downloadHighlights(highlightData, outputDir = this.options.output) {
-		console.log(`📸 Highlight ${highlightData.title} has ${highlightData.items?.length} items`);
-		await fs.writeFile(path.join(outputDir, "highlight.json"), JSON.stringify(highlightData, null, 2));
+	async downloadStories(storiesData, outputDir = this.options.output) {
+		const isHighlight = storiesData.title !== null;
+		const filename = isHighlight ? "highlight" : "story";
+		console.log(`📸 ${isHighlight ? `Highlight ${storiesData.title}` : `User ${storiesData.user.username}`} has ${storiesData.items?.length} stories`);
+		await fs.writeFile(path.join(outputDir, `${filename}.json`), JSON.stringify(storiesData, null, 2));
 		
 		let downloaded = 0;
-		for (const item of highlightData.items || []) {
+		for (const item of storiesData.items || []) {
 			// Name the folder based on the taken_at field of the media data
 			const date = new Date(item.taken_at * 1000 || Date.now());
 			const itemDir = path.join(outputDir, formatDateForFilename(date));
@@ -346,7 +436,7 @@ export default class Instagram {
 			}
 			await fs.mkdirs(itemDir);
 			await this._downloadMediaFromData(item, itemDir, {
-				filename: item.video_versions ? "highlight.mp4" : "highlight.jpg"
+				filename: item.video_versions ? `${filename}.mp4` : `${filename}.jpg`
 			});
 			if (item.story_feed_media && item.story_feed_media.length > 0) {
 				for (const media of item.story_feed_media) {
