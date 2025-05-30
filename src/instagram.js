@@ -244,6 +244,24 @@ export default class Instagram {
 		}
 		return mediaData;
 	}
+	getMediaDataFromShortcodeMedia(mediaCode) {
+		const medias = this._queryCache['xdt_shortcode_media'];
+		if (!medias) {
+			console.error('❌ No shortcode medias found.');
+			return null;
+		}
+		const shortcodeMedia = medias.find(m => m.data?.xdt_shortcode_media?.shortcode == mediaCode);
+		if (!shortcodeMedia) {
+			console.error(`❌ Media ${mediaCode} not found in shortcode medias.`);
+			return null;
+		}
+		const mediaData = shortcodeMedia.data?.xdt_api__v1__media__shortcode__web_info?.items.find(n => n.code == mediaCode);
+		if (!mediaData) {
+			console.error('❌ No media data found.');
+			return null;
+		}
+		return mediaData;
+	}
 
 
 	
@@ -457,39 +475,68 @@ export default class Instagram {
 	// in the same folder
 	async downloadMedia(mediaCode, outputDir = this.options.output) {
 		const queryName = 'xdt_api__v1__media__shortcode__web_info';
+		const shortcodeQueryName = 'xdt_shortcode_media';
 		const incognitoPage = this.options.incognito ? await this._ensureIncognitoExists() : await this._ensurePageExists();
 		
 		// Check if the media data is already cached
 		let mediaData = this.getMediaData(mediaCode);
-		if (!mediaData) {
+		// Logged out users can get xdt_shortcode_media instead of xdt_api__v1__media__shortcode__web_info in the page
+		// (unless it's A/B testing only and logged in users could get that response too)
+		let mediaShortcodeData = this.getMediaDataFromShortcodeMedia(mediaCode);
+		if (!mediaShortcodeData && !mediaData && this.options.incognito) {
 			await incognitoPage.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
 			let webInfo = await this._findObjectFromPage(queryName, { page: incognitoPage });
-			if (!webInfo && this.options.incognito) {
-				console.warn(`❌ No media data found for ${mediaCode} in incognito tab.`);
-				// Might be a private post, try to fetch it from the normal page
-				const page = await this._ensurePageExists();
-				await page.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
-				webInfo = await this._findObjectFromPage(queryName, { page });
+			if (webInfo) {
+				await this._saveResponse({data: webInfo}, queryName);
 			}
-			if (!webInfo) {
-				console.error(`❌ No media data found for ${mediaCode}.`);
+			webInfo = await this._findObjectFromPage(shortcodeQueryName, { page: incognitoPage });
+			if (webInfo) {
+				await this._saveResponse({data: webInfo}, shortcodeQueryName);
+			}
+			mediaData = this.getMediaData(mediaCode);
+			mediaShortcodeData = this.getMediaDataFromShortcodeMedia(mediaCode);
+		}
+		if (!mediaShortcodeData && !mediaData) {
+			if (this.options.incognito) {
+				console.warn(`❌ No media data found for ${mediaCode} in incognito tab.`);
+			}
+			// Might be a private post, try to fetch it from the normal page
+			const page = await this._ensurePageExists();
+			await page.goto(`https://www.instagram.com/p/${mediaCode}/`, { waitUntil: 'networkidle2' });
+			const queryName = 'xdt_api__v1__media__shortcode__web_info';
+			let webInfo = await this._findObjectFromPage(queryName, { page });
+			if (webInfo) {
+				await this._saveResponse({data: webInfo}, queryName);
+			}
+			webInfo = await this._findObjectFromPage(shortcodeQueryName, { page: incognitoPage });
+			if (webInfo) {
+				await this._saveResponse({data: webInfo}, shortcodeQueryName);
+			}
+			mediaData = this.getMediaData(mediaCode);
+			mediaShortcodeData = this.getMediaDataFromShortcodeMedia(mediaCode);
+		}
+		if ((mediaData && mediaData.code !== mediaCode) || (mediaShortcodeData && mediaShortcodeData.shortcode !== mediaCode)) {
+			console.error(`⚠️ Media code mismatch: expected ${mediaCode}, got ${mediaData?.code || mediaShortcodeData?.shortcode}. Cancelling download.`);
+			return null;
+		}
+		if (mediaData) {
+			if (mediaData && mediaData.code !== mediaCode) {
+				console.error(`⚠️ Media code mismatch: expected ${mediaCode}, got ${mediaData?.code}. Cancelling download.`);
 				return null;
 			}
-			await this._saveResponse({data: webInfo}, queryName);
-			mediaData = webInfo?.xdt_api__v1__media__shortcode__web_info?.items[0];
-		}
-		if (!mediaData) {
+			console.log(`📸 Downloading media ${mediaCode} to ${outputDir}...`);
+			await this._downloadMediaFromData(mediaData, outputDir, { page: incognitoPage});
+		} else if (mediaShortcodeData) {
+			if ((mediaShortcodeData && mediaShortcodeData.shortcode !== mediaCode)) {
+				console.error(`⚠️ Media code mismatch: expected ${mediaCode}, got ${mediaShortcodeData?.shortcode}. Cancelling download.`);
+				return null;
+			}
+			console.log(`📸 Downloading media ${mediaCode} to ${outputDir}...`);
+			await this._downloadMediaFromShortcodeData(mediaShortcodeData, outputDir, { page: incognitoPage });
+		} else {
 			console.error(`❌ No media data found for ${mediaCode}.`);
 			return null;
 		}
-		if (mediaData.code !== mediaCode) {
-			console.error(`⚠️ Media code mismatch: expected ${mediaCode}, got ${mediaData.code}. Cancelling download.`);
-			return null;
-		}
-		await fs.writeFile(path.join(outputDir, "media.json"), JSON.stringify(mediaData, null, 2));
-		await fs.writeFile(path.join(outputDir, "caption.txt"), mediaData.caption?.text || '');
-		console.log(`📸 Downloading media ${mediaCode} to ${outputDir}...`);
-		await this._downloadMediaFromData(mediaData, outputDir, { page: incognitoPage});
 	}
 
 	// Download media items from the media data object
@@ -499,6 +546,8 @@ export default class Instagram {
 			return;
 		}
 
+		await fs.writeFile(path.join(outputFolder, "media.json"), JSON.stringify(mediaData, null, 2));
+		await fs.writeFile(path.join(outputFolder, "caption.txt"), mediaData.caption?.text || '');
 		const mediaItems = mediaData.carousel_media || [mediaData];
 		let idx = 1;
 		for (const item of mediaItems) {
@@ -513,7 +562,31 @@ export default class Instagram {
 				page: page || this.page
 			});
 		}
+	}
 
+	// Download media items from the xdt_shortcode_media query response (usually from an incognito page)
+	async _downloadMediaFromShortcodeData(mediaData, outputFolder, { filename, page } = {}) {
+		if (!mediaData || !outputFolder) {
+			console.error('❌ Invalid media data or output folder.');
+			return;
+		}
+
+		await fs.writeFile(path.join(outputFolder, "media.json"), JSON.stringify(mediaData, null, 2));
+		await fs.writeFile(path.join(outputFolder, "caption.txt"), mediaData.edge_media_to_caption?.edges[0]?.node?.text || '');
+		const mediaItems = mediaData.edge_sidecar_to_children ? mediaData.edge_sidecar_to_children.edges.map(e => e.node) : [mediaData];
+		let idx = 1;
+		for (const item of mediaItems) {
+			const mediaUrl = item.video_url || item.display_url;
+			if (!mediaUrl) {
+				console.warn(`❌ No media URL found for item ${item.shortcode}. Skipping...`);
+				continue;
+			}
+			await this._downloadMedia(mediaUrl, outputFolder, {
+				filename,
+				prefix: mediaItems.length > 1 ? `${String(idx++).padStart(2, '0')} - ` : undefined,
+				page: page || this.page
+			});
+		}
 	}
 	
 	/**
