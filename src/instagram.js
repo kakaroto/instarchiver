@@ -63,10 +63,12 @@ export default class Instagram {
 	}
 
 	async _saveResponse(data, queryName) {
-		const timestamp = Date.now();
-		const safeName = sanitizeFilename(queryName || 'data');
-		const filename = path.join(this.options.output, `${timestamp}_${safeName}_${this._queryId++}.json`);
-		await fs.writeFile(filename, JSON.stringify(data, null, 2));
+		if (this.options.debug) {
+			const timestamp = Date.now();
+			const safeName = sanitizeFilename(queryName || 'data');
+			const filename = path.join(this.options.output, `${timestamp}_${safeName}_${this._queryId++}.json`);
+			await fs.writeFile(filename, JSON.stringify(data, null, 2));
+		}
 		this._queryCache[queryName] = this._queryCache[queryName] || [];
 		this._queryCache[queryName].push(data);
 	}
@@ -335,6 +337,7 @@ export default class Instagram {
 			pageUrl = pageUrl.slice(1);
 		}
 		if (pageUrl.startsWith('http')) {
+			pageUrl = pageUrl.replace("https://instagram.com/", "https://www.instagram.com/");
 			if (pageUrl.includes("/highlights/")) {
 				type = 'highlight';
 			} else if (pageUrl.match(/instagram\.com\/[^/]+\/?$/)) {
@@ -371,10 +374,9 @@ export default class Instagram {
 			await fs.writeFile(path.join(output, "profile.json"), JSON.stringify(user, null, 2));
 			if (this.options.posts) {
 				let cursor = null;
-				let done = false;
 				let downloaded = 0;
 				let found_existing_post = false;
-				while (!done) {
+				while (!found_existing_post) {
 					const timelines = this.getUserTimelines(username);
 					let page = 0;
 					for (const timeline of timelines) {
@@ -406,7 +408,7 @@ export default class Instagram {
 						}
 					}
 					retValue += downloaded;
-					if (timelines && timelines[timelines.length - 1].data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info?.has_next_page) {
+					if (timelines.length && timelines[timelines.length - 1].data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info?.has_next_page) {
 						if (this.options.update && found_existing_post) {
 							// If we're updating our archive, stop after encounter a post that were all already downloaded
 							console.log(`⚠️ Updating archive and encountered already downloaded posts. Stopping further downloads.`);
@@ -422,10 +424,9 @@ export default class Instagram {
 						downloaded = 0;
 					} else {
 						console.log('📸 No more posts to fetch.');
-						done = true;
+						break;
 					}
 				}
-
 			}
 			if (this.options.highlights) {
 				const highlights = this.getHighlights(username);
