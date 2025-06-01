@@ -144,7 +144,7 @@ export default class Instagram {
 			console.error('❌ No highlights found.');
 			return [];
 		}
-		const highlightData = highlights.find(h => h?.data?.highlights?.edges?.length && h.data.highlights.edges[0].user?.username == username)?.data.highlights.edges;
+		const highlightData = highlights.find(h => h?.data?.highlights?.edges?.length && h.data.highlights.edges[0].node.user?.username == username)?.data.highlights.edges;
 		if (!highlightData) {
 			console.error('❌ No highlight data found.');
 			return [];
