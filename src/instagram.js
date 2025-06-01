@@ -263,6 +263,21 @@ export default class Instagram {
 		return mediaData;
 	}
 
+	getUserTimelines(username) {
+		const timelineList = this._queryCache['xdt_api__v1__feed__user_timeline_graphql_connection'];
+		if (!timelineList) {
+			console.error('❌ No user timelines found.');
+			return [];
+		}
+		
+		const userTimelineList = timelineList.filter(t => t.data?.xdt_api__v1__feed__user_timeline_graphql_connection?.edges[0]?.node?.user?.username == username);
+		if (!userTimelineList) {
+			console.error(`❌ ${username} timeline not found.`);
+			return []
+		}
+		return userTimelineList;
+	}
+
 
 	
 	async promptCredentials() {
@@ -350,10 +365,68 @@ export default class Instagram {
 			console.log(`📸 Archiving profile of ${username}...`);
 			await this.page.goto(pageUrl, { waitUntil: 'networkidle2' });
 			await waitMS(2000, 1000); // Wait for 2 to 3 seconds to ensure the page is fully loaded
-			const output = path.join(outputDir, sanitizeFilename(pageUrl.split('/').filter(a => a).pop()));
+			const output = path.join(outputDir, sanitizeFilename(username));
 			await fs.mkdirs(output);
 			const user = this.getUserData(username);
 			await fs.writeFile(path.join(output, "profile.json"), JSON.stringify(user, null, 2));
+			if (this.options.posts) {
+				let cursor = null;
+				let done = false;
+				let downloaded = 0;
+				let found_existing_post = false;
+				while (!done) {
+					const timelines = this.getUserTimelines(username);
+					let page = 0;
+					for (const timeline of timelines) {
+						page++;
+						// API doesn't fill start_cursor, so we use the end_cursor from the last page
+						if (cursor) {
+							if (timeline.data.xdt_api__v1__feed__user_timeline_graphql_connection.page_info.end_cursor == cursor) {
+								cursor = null; // Reset cursor if it matches the last page's end_cursor
+							}
+							// Skip, we already processed this page
+							continue;
+						}
+						const edges = timeline?.data?.xdt_api__v1__feed__user_timeline_graphql_connection?.edges || [];
+						console.log(`📸 Found ${edges.length} posts in timeline (page ${page}).`);
+						await fs.writeFile(path.join(output, `${String(page).padStart(2, "0")} - timeline.json`), JSON.stringify(timeline, null, 2));
+						
+						for (const edge of edges) {
+							// Name the folder based on the taken_at field of the media data
+							const date = new Date(edge.node?.taken_at * 1000 || Date.now());
+							const postOutput = path.join(output, 'posts', formatDateForFilename(date));
+							if (await fs.pathExists(postOutput)) {
+								console.warn(`⚠️ Folder ${postOutput} already exists. Skipping download for this item.`);
+								found_existing_post = true;
+								continue;
+							}
+							await fs.mkdirs(postOutput);
+							await this._downloadMediaFromData(edge.node, postOutput);
+							downloaded++;
+						}
+					}
+					retValue += downloaded;
+					if (timelines && timelines[timelines.length - 1].data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info?.has_next_page) {
+						if (this.options.update && found_existing_post) {
+							// If we're updating our archive, stop after encounter a post that were all already downloaded
+							console.log(`⚠️ Updating archive and encountered already downloaded posts. Stopping further downloads.`);
+							break;
+						}
+						// Scroll to the end of the page to load more posts
+						console.log('📸 Scrolling to load more posts...')
+						await this.page.evaluate(() => {
+							window.scrollTo(0, document.body.scrollHeight); // eslint-disable-line no-undef
+						});
+						await waitMS(3000, 2000); // Wait for 3 to 5 seconds to ensure the page is fully loaded
+						cursor = timelines[timelines.length - 1].data?.xdt_api__v1__feed__user_timeline_graphql_connection?.page_info?.end_cursor;
+						downloaded = 0;
+					} else {
+						console.log('📸 No more posts to fetch.');
+						done = true;
+					}
+				}
+
+			}
 			if (this.options.highlights) {
 				const highlights = this.getHighlights(username);
 				if (highlights) {

@@ -4,7 +4,7 @@ import Instagram from './instagram.js';
 
 async function main() {
     const args = minimist(process.argv.slice(2), {
-        boolean: ['headless', 'logout', 'debug', 'update', 'incognito', 'highlights', 'stories', 'feed', 'saved', 'pause'],
+        boolean: ['headless', 'logout', 'debug', 'update', 'incognito', 'highlights', 'stories', 'posts', 'saved', 'pause'],
         string: ['user-data', 'output'],
         alias: {
             h: 'help',
@@ -22,7 +22,7 @@ async function main() {
             update: false,
             highlights: true,
             stories: true,
-            feed: true,
+            posts: true,
             saved: true,
         },
     });
@@ -35,7 +35,7 @@ async function main() {
         console.log('  --update                 Update an existing archive');
         console.log('  --highlights             Archive highlights from a user (default: true)');
         console.log('  --stories                Archive stories from a user (default: true)');
-        console.log('  --feed                   Archive feed posts from a user (default: true)');
+        console.log('  --posts                  Archive posts from a user (default: true)');
         console.log('  --saved                  Archive saved posts from a user (default: true)');
         console.log('  --no-incognito           Do not use an incognito window for downloading public media reels');
         console.log('  --no-headless            Run browser in non-headless mode');
